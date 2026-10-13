@@ -14,6 +14,9 @@
 #include <cmath>
 #include <climits>
 #include <unordered_map>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 
 #if DLSS_ENABLED
 #   include "render/plume_dlss.h"
@@ -1144,6 +1147,117 @@ namespace plume {
 
     // VulkanDescriptorSetLayout
 
+    static uint32_t getBoundlessFallbackCount(VulkanDevice *device, const RenderDescriptorSetDesc &desc) {
+        assert(device != nullptr);
+        assert(desc.descriptorRangesCount > 0);
+
+        const VkDescriptorType targetType = toVk(desc.descriptorRanges[desc.descriptorRangesCount - 1].type);
+        uint64_t resourcesUsed = 0;
+        uint64_t sampledImagesUsed = 0;
+        uint64_t samplersUsed = 0;
+        uint64_t storageImagesUsed = 0;
+        uint64_t uniformBuffersUsed = 0;
+        uint64_t storageBuffersUsed = 0;
+        uint64_t inputAttachmentsUsed = 0;
+
+        for (uint32_t i = 0; i + 1 < desc.descriptorRangesCount; i++) {
+            const VkDescriptorType type = toVk(desc.descriptorRanges[i].type);
+            const uint64_t count = desc.descriptorRanges[i].count;
+            resourcesUsed += count;
+            switch (type) {
+            case VK_DESCRIPTOR_TYPE_SAMPLER:
+                samplersUsed += count;
+                break;
+            case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                sampledImagesUsed += count;
+                samplersUsed += count;
+                break;
+            case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+                sampledImagesUsed += count;
+                break;
+            case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                storageImagesUsed += count;
+                break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+                sampledImagesUsed += count;
+                break;
+            case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+                storageImagesUsed += count;
+                break;
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+                uniformBuffersUsed += count;
+                break;
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                storageBuffersUsed += count;
+                break;
+            case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+                inputAttachmentsUsed += count;
+                break;
+            default:
+                break;
+            }
+        }
+
+        const VkPhysicalDeviceLimits &limits = device->physicalDeviceProperties.limits;
+        uint64_t perStageLimit = limits.maxPerStageResources;
+        uint64_t setLimit = limits.maxPerStageResources;
+        switch (targetType) {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+            perStageLimit = uint64_t(limits.maxPerStageDescriptorSamplers) - std::min<uint64_t>(samplersUsed, limits.maxPerStageDescriptorSamplers);
+            setLimit = uint64_t(limits.maxDescriptorSetSamplers) - std::min<uint64_t>(samplersUsed, limits.maxDescriptorSetSamplers);
+            break;
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+            perStageLimit = std::min(limits.maxPerStageDescriptorSampledImages, limits.maxPerStageDescriptorSamplers);
+            setLimit = std::min(limits.maxDescriptorSetSampledImages, limits.maxDescriptorSetSamplers);
+            perStageLimit = std::min<uint64_t>(
+                uint64_t(limits.maxPerStageDescriptorSampledImages) - std::min<uint64_t>(sampledImagesUsed, limits.maxPerStageDescriptorSampledImages),
+                uint64_t(limits.maxPerStageDescriptorSamplers) - std::min<uint64_t>(samplersUsed, limits.maxPerStageDescriptorSamplers));
+            setLimit = std::min<uint64_t>(
+                uint64_t(limits.maxDescriptorSetSampledImages) - std::min<uint64_t>(sampledImagesUsed, limits.maxDescriptorSetSampledImages),
+                uint64_t(limits.maxDescriptorSetSamplers) - std::min<uint64_t>(samplersUsed, limits.maxDescriptorSetSamplers));
+            break;
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+            perStageLimit = uint64_t(limits.maxPerStageDescriptorSampledImages) - std::min<uint64_t>(sampledImagesUsed, limits.maxPerStageDescriptorSampledImages);
+            setLimit = uint64_t(limits.maxDescriptorSetSampledImages) - std::min<uint64_t>(sampledImagesUsed, limits.maxDescriptorSetSampledImages);
+            break;
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+            perStageLimit = uint64_t(limits.maxPerStageDescriptorStorageImages) - std::min<uint64_t>(storageImagesUsed, limits.maxPerStageDescriptorStorageImages);
+            setLimit = uint64_t(limits.maxDescriptorSetStorageImages) - std::min<uint64_t>(storageImagesUsed, limits.maxDescriptorSetStorageImages);
+            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            perStageLimit = uint64_t(limits.maxPerStageDescriptorSampledImages) - std::min<uint64_t>(sampledImagesUsed, limits.maxPerStageDescriptorSampledImages);
+            setLimit = uint64_t(limits.maxDescriptorSetSampledImages) - std::min<uint64_t>(sampledImagesUsed, limits.maxDescriptorSetSampledImages);
+            break;
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            perStageLimit = uint64_t(limits.maxPerStageDescriptorStorageImages) - std::min<uint64_t>(storageImagesUsed, limits.maxPerStageDescriptorStorageImages);
+            setLimit = uint64_t(limits.maxDescriptorSetStorageImages) - std::min<uint64_t>(storageImagesUsed, limits.maxDescriptorSetStorageImages);
+            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+            perStageLimit = uint64_t(limits.maxPerStageDescriptorUniformBuffers) - std::min<uint64_t>(uniformBuffersUsed, limits.maxPerStageDescriptorUniformBuffers);
+            setLimit = uint64_t(limits.maxDescriptorSetUniformBuffers) - std::min<uint64_t>(uniformBuffersUsed, limits.maxDescriptorSetUniformBuffers);
+            break;
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+            perStageLimit = uint64_t(limits.maxPerStageDescriptorStorageBuffers) - std::min<uint64_t>(storageBuffersUsed, limits.maxPerStageDescriptorStorageBuffers);
+            setLimit = uint64_t(limits.maxDescriptorSetStorageBuffers) - std::min<uint64_t>(storageBuffersUsed, limits.maxDescriptorSetStorageBuffers);
+            break;
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+            perStageLimit = uint64_t(limits.maxPerStageDescriptorInputAttachments) - std::min<uint64_t>(inputAttachmentsUsed, limits.maxPerStageDescriptorInputAttachments);
+            setLimit = uint64_t(limits.maxDescriptorSetInputAttachments) - std::min<uint64_t>(inputAttachmentsUsed, limits.maxDescriptorSetInputAttachments);
+            break;
+        default:
+            break;
+        }
+
+        const uint64_t resourcesLimit = uint64_t(limits.maxPerStageResources) - std::min<uint64_t>(resourcesUsed, limits.maxPerStageResources);
+        const uint64_t available = std::min({perStageLimit, setLimit, resourcesLimit});
+        const uint64_t requested = std::max(desc.boundlessRangeSize, 1U);
+        return static_cast<uint32_t>(std::min<uint64_t>({requested, available, UINT32_MAX}));
+    }
+
     VulkanDescriptorSetLayout::VulkanDescriptorSetLayout(VulkanDevice *device, const RenderDescriptorSetDesc &descriptorSetDesc) {
         assert(device != nullptr);
 
@@ -1168,9 +1282,24 @@ namespace plume {
         uint32_t immutableSamplerIndex = 0;
         for (uint32_t i = 0; i < descriptorSetDesc.descriptorRangesCount; i++) {
             const RenderDescriptorRange &srcRange = descriptorSetDesc.descriptorRanges[i];
+            uint32_t descriptorCount = srcRange.count;
+            const bool isLastBoundlessRange = descriptorSetDesc.lastRangeIsBoundless &&
+                (i + 1 == descriptorSetDesc.descriptorRangesCount);
+            if (isLastBoundlessRange && !device->capabilities.descriptorIndexing) {
+                descriptorCount = getBoundlessFallbackCount(device, descriptorSetDesc);
+                boundlessFallbackCount = descriptorCount;
+                if (descriptorCount == 0) {
+#if defined(__ANDROID__)
+                    __android_log_print(ANDROID_LOG_ERROR, "RT64",
+                        "boundless descriptor fallback has no capacity for type %d", toVk(srcRange.type));
+#endif
+                    fprintf(stderr, "Boundless descriptor fallback has no capacity for type %d.\n", toVk(srcRange.type));
+                    return;
+                }
+            }
             VkDescriptorSetLayoutBinding dstBinding = {};
             dstBinding.binding = srcRange.binding;
-            dstBinding.descriptorCount = srcRange.count;
+            dstBinding.descriptorCount = descriptorCount;
             dstBinding.stageFlags = VK_SHADER_STAGE_ALL;
             dstBinding.descriptorType = toVk(srcRange.type);
             if (srcRange.immutableSampler != nullptr) {
@@ -1180,7 +1309,7 @@ namespace plume {
 
             uint32_t indexBase = uint32_t(descriptorIndexBases.size());
             uint32_t bindingIndex = uint32_t(setBindings.size());
-            for (uint32_t j = 0; j < srcRange.count; j++) {
+            for (uint32_t j = 0; j < descriptorCount; j++) {
                 descriptorIndexBases.emplace_back(indexBase);
                 descriptorBindingIndices.emplace_back(bindingIndex);
             }
@@ -1195,7 +1324,8 @@ namespace plume {
         
         thread_local std::vector<VkDescriptorBindingFlags> bindingFlags;
         VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo = {};
-        if (descriptorSetDesc.lastRangeIsBoundless && (descriptorSetDesc.descriptorRangesCount > 0)) {
+        const bool useBoundless = descriptorSetDesc.lastRangeIsBoundless && device->capabilities.descriptorIndexing;
+        if (useBoundless && (descriptorSetDesc.descriptorRangesCount > 0)) {
             bindingFlags.clear();
             bindingFlags.resize(descriptorSetDesc.descriptorRangesCount, 0);
             bindingFlags[descriptorSetDesc.descriptorRangesCount - 1] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
@@ -1210,7 +1340,12 @@ namespace plume {
         
         VkResult res = vkCreateDescriptorSetLayout(device->vk, &setLayoutInfo, nullptr, &vk);
         if (res != VK_SUCCESS) {
-            fprintf(stderr, "vkCreateDescriptorSetLayout failed with error code 0x%X.\n", res);
+            fprintf(stderr, "vkCreateDescriptorSetLayout failed with VkResult %d.\n", res);
+#if defined(__ANDROID__)
+            __android_log_print(ANDROID_LOG_ERROR, "RT64",
+                "vkCreateDescriptorSetLayout failed with VkResult %d (descriptor indexing enabled=%d).",
+                res, device->capabilities.descriptorIndexing ? 1 : 0);
+#endif
             return;
         }
     }
@@ -1257,6 +1392,14 @@ namespace plume {
         for (uint32_t i = 0; i < desc.descriptorSetDescsCount; i++) {
             VulkanDescriptorSetLayout *setLayout = new VulkanDescriptorSetLayout(device, desc.descriptorSetDescs[i]);
             descriptorSetLayouts.emplace_back(setLayout);
+            if (setLayout->vk == VK_NULL_HANDLE) {
+                fprintf(stderr, "VulkanPipelineLayout cannot be created because descriptor set layout %u is null.\n", i);
+#if defined(__ANDROID__)
+                __android_log_print(ANDROID_LOG_ERROR, "RT64",
+                    "VulkanPipelineLayout refused null descriptor set layout %u.", i);
+#endif
+                return;
+            }
             setLayoutHandles.emplace_back(setLayout->vk);
         }
 
@@ -1887,16 +2030,28 @@ namespace plume {
 
         this->device = device;
 
+        setLayout = new VulkanDescriptorSetLayout(device, desc);
+        if (setLayout->vk == VK_NULL_HANDLE) {
+            fprintf(stderr, "VulkanDescriptorSet cannot be allocated because its layout is null.\n");
+#if defined(__ANDROID__)
+            __android_log_print(ANDROID_LOG_ERROR, "RT64", "VulkanDescriptorSet refused a null descriptor-set layout.");
+#endif
+            return;
+        }
+
         thread_local std::unordered_map<VkDescriptorType, uint32_t> typeCounts;
         typeCounts.clear();
         
         uint32_t boundlessRangeSize = 0;
         uint32_t rangeCount = desc.descriptorRangesCount;
-        if (desc.lastRangeIsBoundless) {
+        const bool boundlessRequested = desc.lastRangeIsBoundless && (desc.descriptorRangesCount > 0);
+        const bool useBoundless = boundlessRequested && device->capabilities.descriptorIndexing;
+        if (boundlessRequested) {
             assert((desc.descriptorRangesCount > 0) && "There must be at least one descriptor set to define the last range as boundless.");
 
-            // Ensure at least one entry is created for boundless ranges.
-            boundlessRangeSize = std::max(desc.boundlessRangeSize, 1U);
+            boundlessRangeSize = useBoundless
+                ? std::max(desc.boundlessRangeSize, 1U)
+                : std::max(setLayout->boundlessFallbackCount, 1U);
 
             const RenderDescriptorRange &lastDescriptorRange = desc.descriptorRanges[desc.descriptorRangesCount - 1];
             typeCounts[toVk(lastDescriptorRange.type)] += boundlessRangeSize;
@@ -1908,9 +2063,7 @@ namespace plume {
             typeCounts[toVk(descriptorRange.type)] += descriptorRange.count;
         }
 
-        setLayout = new VulkanDescriptorSetLayout(device, desc);
-
-        descriptorPool = createDescriptorPool(device, typeCounts, desc.lastRangeIsBoundless);
+        descriptorPool = createDescriptorPool(device, typeCounts, useBoundless);
         if (descriptorPool == VK_NULL_HANDLE) {
             return;
         }
@@ -1922,7 +2075,7 @@ namespace plume {
         allocateInfo.descriptorSetCount = 1;
 
         VkDescriptorSetVariableDescriptorCountAllocateInfo countInfo = {};
-        if (desc.lastRangeIsBoundless) {
+        if (useBoundless) {
             countInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
             countInfo.pDescriptorCounts = &boundlessRangeSize;
             countInfo.descriptorSetCount = 1;
@@ -2019,6 +2172,9 @@ namespace plume {
     }
 
     void VulkanDescriptorSet::setDescriptor(uint32_t descriptorIndex, const VkDescriptorBufferInfo *bufferInfo, const VkDescriptorImageInfo *imageInfo, const VkBufferView *texelBufferView, void *pNext) {
+        if ((vk == VK_NULL_HANDLE) || (setLayout == nullptr) || (setLayout->vk == VK_NULL_HANDLE)) {
+            return;
+        }
         assert(descriptorIndex < setLayout->descriptorBindingIndices.size());
 
         const uint32_t indexBase = setLayout->descriptorIndexBases[descriptorIndex];
@@ -2039,7 +2195,7 @@ namespace plume {
         vkUpdateDescriptorSets(device->vk, 1, &writeDescriptor, 0, nullptr);
     }
 
-    VkDescriptorPool VulkanDescriptorSet::createDescriptorPool(VulkanDevice *device, const std::unordered_map<VkDescriptorType, uint32_t> &typeCounts, bool lastRangeIsBoundless) {
+    VkDescriptorPool VulkanDescriptorSet::createDescriptorPool(VulkanDevice *device, const std::unordered_map<VkDescriptorType, uint32_t> &typeCounts, bool useBoundless) {
         thread_local std::vector<VkDescriptorPoolSize> poolSizes;
         poolSizes.clear();
 
@@ -2057,7 +2213,7 @@ namespace plume {
         poolInfo.pPoolSizes = !poolSizes.empty() ? poolSizes.data() : nullptr;
         poolInfo.poolSizeCount = uint32_t(poolSizes.size());
 
-        if (lastRangeIsBoundless) {
+        if (useBoundless) {
             poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
         }
 
