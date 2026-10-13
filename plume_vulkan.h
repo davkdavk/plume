@@ -122,6 +122,7 @@ namespace plume {
         std::vector<VkDescriptorSetLayoutBinding> setBindings;
         std::vector<uint32_t> descriptorIndexBases;
         std::vector<uint32_t> descriptorBindingIndices;
+        uint32_t boundlessFallbackCount = 0;
         VulkanDevice *device = nullptr;
 
         VulkanDescriptorSetLayout(VulkanDevice *device, const RenderDescriptorSetDesc &descriptorSetDesc);
