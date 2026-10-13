@@ -1254,8 +1254,8 @@ namespace plume {
 
         const uint64_t resourcesLimit = uint64_t(limits.maxPerStageResources) - std::min<uint64_t>(resourcesUsed, limits.maxPerStageResources);
         const uint64_t available = std::min({perStageLimit, setLimit, resourcesLimit});
-        const uint64_t requested = std::max(desc.boundlessRangeSize, 1U);
-        return static_cast<uint32_t>(std::min<uint64_t>({requested, available, UINT32_MAX}));
+        const uint64_t declaredMaximum = desc.descriptorRanges[desc.descriptorRangesCount - 1].count;
+        return static_cast<uint32_t>(std::min<uint64_t>({declaredMaximum, available, UINT32_MAX}));
     }
 
     VulkanDescriptorSetLayout::VulkanDescriptorSetLayout(VulkanDevice *device, const RenderDescriptorSetDesc &descriptorSetDesc) {
